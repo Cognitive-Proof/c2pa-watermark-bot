@@ -21,6 +21,7 @@ response with the reason and any resolution APIs the list gives for them.
 | `com.adobe.trustmark.F` | none | no public model |
 | `me.reconize.videoseal.1` | Meta [VideoSeal](https://github.com/facebookresearch/videoseal) 1.0 (MIT), via ONNX | Reconize says it uses VideoSeal but not which checkpoint; unconfirmed against a real Reconize image |
 | `com.aiwatermark.pixelseal.1` | Meta PixelSeal (MIT), via ONNX | AIWatermark says it uses PixelSeal but not whether it changed the model; unconfirmed |
+| `com.microsoft.invismark.1` | Microsoft [InvisMark](https://github.com/microsoft/InvisMark) paper checkpoint (MIT), via ONNX | Nothing ties the paper checkpoint to the registered model; unconfirmed |
 
 No other image algorithm in the list has public decoder code as of 2026-11.
 Detectors implement `detectors::Detector`, so more can be added.
@@ -60,6 +61,29 @@ cropped watermark. Bit accuracy on detected marks was 95–100%. A payload
 matches a manifest value when at least 90% of bits agree (base64, hex or
 bitstring, MSB first). Reproduce with `scripts/calibrate_videoseal.py`.
 
+### InvisMark detection
+
+The paper checkpoint decodes 100 bits with no error correction and no
+detection output. The score is the mean of |2p − 1| over the bit
+probabilities, from 0 (all 0.5) to 1 (all certain); a watermark is reported at
+0.8 or more.
+
+| Images | Score |
+|---|---|
+| 216 clean (Kodak with crops, rotations, JPEG 30, downscales, grayscale) | max 0.66 |
+| Watermarked, PNG, or downscaled 2x or 4x | min 0.99 |
+| Watermarked, JPEG 80 | min 0.93 |
+| Watermarked, brightness +30% | min 0.90 |
+| Watermarked, JPEG 50 | median 0.72 (mostly missed) |
+| Watermarked, then cropped to 50% | ~0.28 (not detectable) |
+
+The checkpoint was trained on the first 100 bits of a UUID4, and decodes
+random bits worse (94% on PNG against 100% for UUIDs). Its decoder outputs the
+UUID4 version and variant bits on clean images too, so they can't serve as a
+check. Manifest values may be a UUID, hex, base64 or a bitstring and match on
+at least 90% of the first 100 bits. Reproduce with
+`scripts/calibrate_invismark.py`.
+
 ## Running
 
 ```sh
@@ -76,6 +100,19 @@ python -m venv .venv && .venv/bin/pip install torch torchvision omegaconf einops
   timm==0.9.16 safetensors scipy onnx onnxruntime requests tqdm av \
   opencv-python-headless pycocotools pillow
 .venv/bin/python scripts/export_videoseal_onnx.py --videoseal /tmp/videoseal --out models
+```
+
+The InvisMark detector needs an ONNX export (~350 MB) of the paper checkpoint.
+Download `ckpt_paper.zip` (1.06 GB) from the OneDrive folder linked in
+Microsoft's README; it needs a browser. The checkpoint is loaded with
+`weights_only=True`, so it can't run code.
+
+```sh
+git clone https://github.com/microsoft/InvisMark /tmp/invismark
+unzip ckpt_paper.zip -d /tmp/invismark-ckpt
+.venv/bin/pip install kornia bchlib
+.venv/bin/python scripts/export_invismark_onnx.py --invismark /tmp/invismark \
+  --ckpt /tmp/invismark-ckpt/paper.ckpt --out models
 ```
 
 Detectors whose model files are missing are skipped and listed in `not_checked`.

@@ -9,7 +9,6 @@
 
 use std::{path::Path, sync::Mutex};
 
-use base64::prelude::{BASE64_STANDARD, Engine as _};
 use image::{DynamicImage, imageops::FilterType};
 use ndarray::Array4;
 use ort::{
@@ -17,7 +16,7 @@ use ort::{
     value::Value,
 };
 
-use super::{DetectError, Detection, Detector, Payload};
+use super::{DetectError, Detection, Detector, Payload, bits};
 
 const INPUT_SIZE: u32 = 256;
 const NBITS: usize = 256;
@@ -142,7 +141,7 @@ impl Detector for VideoSealDetector {
                 .map(|&l| if l > 0.0 { '1' } else { '0' })
                 .collect();
             Payload {
-                hex: Some(hex::encode(bits_to_bytes(&bits))),
+                hex: Some(hex::encode(bits::bits_to_bytes(&bits))),
                 bits,
                 schema: None,
             }
@@ -156,73 +155,11 @@ impl Detector for VideoSealDetector {
     /// Accepts a value as base64 (Reconize writes the 32 payload bytes as a
     /// byte string), hex, or a bitstring, and compares bits MSB first.
     fn matches_value(&self, block_value: &str, payload: &Payload) -> bool {
-        let Some(expected) = value_bits(block_value) else {
-            return false;
-        };
-        if expected.len() != payload.bits.len() {
-            return false;
-        }
-        let agree = expected
-            .chars()
-            .zip(payload.bits.chars())
-            .filter(|(a, b)| a == b)
-            .count();
-        agree as f32 / expected.len() as f32 >= MATCH_AGREEMENT
+        bits::value_bits(block_value, NBITS)
+            .is_some_and(|expected| bits::agreement(&expected, &payload.bits) >= MATCH_AGREEMENT)
     }
 
     fn note(&self) -> Option<&str> {
         Some(self.model.note())
-    }
-}
-
-fn bits_to_bytes(bits: &str) -> Vec<u8> {
-    bits.as_bytes()
-        .chunks(8)
-        .map(|chunk| chunk.iter().fold(0u8, |acc, &b| (acc << 1) | (b - b'0')))
-        .collect()
-}
-
-fn bytes_to_bits(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:08b}")).collect()
-}
-
-/// A block value's payload as a 256-bit string, or `None` if it isn't one.
-fn value_bits(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.len() == NBITS && value.chars().all(|c| c == '0' || c == '1') {
-        return Some(value.to_owned());
-    }
-    if value.len() == NBITS / 4
-        && let Ok(bytes) = hex::decode(value)
-    {
-        return Some(bytes_to_bits(&bytes));
-    }
-    match BASE64_STANDARD.decode(value) {
-        Ok(bytes) if bytes.len() == NBITS / 8 => Some(bytes_to_bits(&bytes)),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bits_and_bytes_round_trip() {
-        let bytes: Vec<u8> = (0..32).map(|i| i * 7).collect();
-        assert_eq!(bits_to_bytes(&bytes_to_bits(&bytes)), bytes);
-    }
-
-    #[test]
-    fn parses_value_encodings() {
-        let bytes = [0xA5u8; 32];
-        let bits = bytes_to_bits(&bytes);
-        assert_eq!(
-            value_bits(&BASE64_STANDARD.encode(bytes)).as_deref(),
-            Some(&*bits)
-        );
-        assert_eq!(value_bits(&hex::encode(bytes)).as_deref(), Some(&*bits));
-        assert_eq!(value_bits(&bits).as_deref(), Some(&*bits));
-        assert_eq!(value_bits("1*0101"), None);
     }
 }

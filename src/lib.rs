@@ -7,6 +7,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use detectors::{
     Detector,
+    invismark::{self, InvisMarkDetector},
     trustmark::{self as tm, TrustmarkDetector},
     videoseal::{self as vs, VideoSealDetector},
 };
@@ -53,6 +54,29 @@ pub fn load_state(models_dir: &Path) -> Result<api::AppState, serde_json::Error>
             continue;
         }
         match VideoSealDetector::load(models_dir, model) {
+            Ok(detector) => {
+                tracing::info!(%alg, "loaded detector");
+                detectors.push(Arc::new(detector));
+            }
+            Err(err) => {
+                tracing::warn!(%alg, %err, "failed to load detector");
+                unavailable.insert(alg, format!("failed to load model: {err}"));
+            }
+        }
+    }
+
+    let alg = invismark::ALG.to_owned();
+    if !models_dir.join(invismark::MODEL_FILENAME).is_file() {
+        unavailable.insert(
+            alg,
+            format!(
+                "{} not found in {} (see scripts/export_invismark_onnx.py)",
+                invismark::MODEL_FILENAME,
+                models_dir.display()
+            ),
+        );
+    } else {
+        match InvisMarkDetector::load(models_dir) {
             Ok(detector) => {
                 tracing::info!(%alg, "loaded detector");
                 detectors.push(Arc::new(detector));

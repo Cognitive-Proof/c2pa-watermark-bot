@@ -3,6 +3,8 @@
 use image::DynamicImage;
 use serde::Serialize;
 
+pub mod bits;
+pub mod invismark;
 pub mod trustmark;
 pub mod videoseal;
 

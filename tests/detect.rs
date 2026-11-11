@@ -155,12 +155,20 @@ async fn rejects_non_image() {
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
-fn videoseal_models_present() -> bool {
-    let present = ["videoseal_detector.onnx", "pixelseal_detector.onnx"]
-        .iter()
-        .all(|f| Path::new(MODELS).join(f).is_file());
+const VIDEOSEAL: &str = "me.reconize.videoseal.1";
+const PIXELSEAL: &str = "com.aiwatermark.pixelseal.1";
+const INVISMARK: &str = "com.microsoft.invismark.1";
+
+fn onnx_models_present() -> bool {
+    let present = [
+        "videoseal_detector.onnx",
+        "pixelseal_detector.onnx",
+        "invismark_decoder.onnx",
+    ]
+    .iter()
+    .all(|f| Path::new(MODELS).join(f).is_file());
     if !present {
-        eprintln!("skipping: VideoSeal models not found in {MODELS}/");
+        eprintln!("skipping: VideoSeal or InvisMark ONNX models not found in {MODELS}/");
     }
     present
 }
@@ -174,11 +182,12 @@ fn watermark<'a>(body: &'a Value, alg: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no result for {alg}: {body:#}"))
 }
 
-/// Checks a fixture written by `scripts/calibrate_videoseal.py`: found by its
-/// own detector with the embedded bits, not by the other model, and scored
+/// Checks a fixture written by `scripts/calibrate_videoseal.py` or
+/// `scripts/calibrate_invismark.py`: found by its own detector with at least
+/// `min_agreement` of the embedded bits, not found by the others, and scored
 /// like the Python reference.
-async fn check_videoseal_fixture(name: &str, alg: &str, other_alg: &str) {
-    if !videoseal_models_present() {
+async fn check_fixture(name: &str, alg: &str, min_agreement: f64) {
+    if !onnx_models_present() {
         return;
     }
     let fixtures = Path::new("tests/fixtures");
@@ -195,12 +204,14 @@ async fn check_videoseal_fixture(name: &str, alg: &str, other_alg: &str) {
     assert_eq!(result["found"], true, "{body:#}");
     let decoded = result["payload"]["bits"].as_str().unwrap();
     let embedded = expected["embedded_bits"].as_str().unwrap();
+    assert_eq!(decoded.len(), embedded.len());
     let agree = decoded
         .chars()
         .zip(embedded.chars())
         .filter(|(a, b)| a == b)
-        .count();
-    assert!(agree >= 240, "{agree}/256 bits match: {body:#}");
+        .count() as f64
+        / embedded.len() as f64;
+    assert!(agree >= min_agreement, "{agree} of bits match: {body:#}");
 
     let score = result["score"].as_f64().unwrap();
     let reference = expected["score_on_fixture"].as_f64().unwrap();
@@ -209,40 +220,39 @@ async fn check_videoseal_fixture(name: &str, alg: &str, other_alg: &str) {
         "Rust score {score} vs Python {reference}"
     );
 
-    assert_eq!(watermark(&body, other_alg)["found"], false, "{body:#}");
+    for other in [VIDEOSEAL, PIXELSEAL, INVISMARK] {
+        if other != alg {
+            assert_eq!(watermark(&body, other)["found"], false, "{other}: {body:#}");
+        }
+    }
     let not_checked = body["not_checked"].as_array().unwrap();
     assert!(!not_checked.iter().any(|a| a["alg"] == alg));
 }
 
 #[tokio::test]
 async fn finds_videoseal_watermark() {
-    check_videoseal_fixture(
-        "videoseal",
-        "me.reconize.videoseal.1",
-        "com.aiwatermark.pixelseal.1",
-    )
-    .await;
+    check_fixture("videoseal", VIDEOSEAL, 0.94).await;
 }
 
 #[tokio::test]
 async fn finds_pixelseal_watermark() {
-    check_videoseal_fixture(
-        "pixelseal",
-        "com.aiwatermark.pixelseal.1",
-        "me.reconize.videoseal.1",
-    )
-    .await;
+    check_fixture("pixelseal", PIXELSEAL, 0.94).await;
 }
 
 #[tokio::test]
-async fn clean_image_scores_below_videoseal_threshold() {
-    if !videoseal_models_present() {
+async fn finds_invismark_watermark() {
+    check_fixture("invismark", INVISMARK, 0.94).await;
+}
+
+#[tokio::test]
+async fn clean_image_scores_below_onnx_thresholds() {
+    if !onnx_models_present() {
         return;
     }
     let (_, body) = post_detect(app(), png_bytes(&test_image()), "image/png").await;
-    for alg in ["me.reconize.videoseal.1", "com.aiwatermark.pixelseal.1"] {
+    for (alg, max_score) in [(VIDEOSEAL, 2.0), (PIXELSEAL, 2.0), (INVISMARK, 0.66)] {
         let result = watermark(&body, alg);
         assert_eq!(result["found"], false, "{body:#}");
-        assert!(result["score"].as_f64().unwrap() < 2.0, "{body:#}");
+        assert!(result["score"].as_f64().unwrap() < max_score, "{body:#}");
     }
 }
