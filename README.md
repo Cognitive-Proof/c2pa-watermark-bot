@@ -84,6 +84,34 @@ check. Manifest values may be a UUID, hex, base64 or a bitstring and match on
 at least 90% of the first 100 bits. Reproduce with
 `scripts/calibrate_invismark.py`.
 
+### Vendor resolution APIs
+
+Some vendors run a [C2PA Soft Binding Resolution API](https://spec.c2pa.org/specifications/specifications/2.2/softbinding/Decoupled.html)
+that finds the manifest for an image or a watermark value. The bot can query
+them, but both kinds of query send data to a third party, so **both are off
+by default**:
+
+- **Lookups** (`REMOTE_LOOKUPS=1`) send a value derived from the image, never
+  the image: payloads decoded locally, and the file's SHA-256.
+- **Uploads** (`REMOTE_UPLOADS=trufo,aiwatermark,etchv` or `all`) send the
+  image itself.
+
+| Service | `alg` | Lookup | Upload |
+|---|---|---|---|
+| Reconize (`relay.reconize.me`, from Reconize's site, not the list) | `me.reconize.videoseal.1` | the locally decoded VideoSeal payload | refused by the service |
+| AIWatermark | `com.aiwatermark.pixelseal.1` | the locally decoded PixelSeal payload | `aiwatermark` |
+| Monolith | `com.joinmonolith.sha256` | the file's SHA-256, computed locally | not needed |
+| Trufo | `ai.trufo.pawprint.watermark`, `.fingerprint` | — | `trufo` |
+| Etchv | `com.etchv.watermark.1` | — | `etchv` |
+| BlockFact | `io.blockfact.audio.watermark.32` | needs a value the bot can't decode | a stub that asks for an extracted value |
+
+As of 2026-11 none of these needed credentials. An algorithm checked remotely
+leaves `not_checked`; one with a match is listed in `remote_matches`. The
+queries are in `remote.queries`, each with the service, method, any `value`
+sent, the matches (`manifestId`, `endpoint`, `similarityScore`) and any error.
+
+Uploads are sent as the raw image with its media type, as the spec defines.
+
 ## Running
 
 ```sh
@@ -122,6 +150,8 @@ Detectors whose model files are missing are skipped and listed in `not_checked`.
 | `BIND_ADDR` | `127.0.0.1:8080` | |
 | `MODELS_DIR` | `models` | Missing models disable that detector |
 | `MAX_UPLOAD_MB` | `25` | |
+| `REMOTE_LOOKUPS` | off | `1` sends decoded payloads and file hashes to resolution APIs |
+| `REMOTE_UPLOADS` | none | Services to send images to: `trufo`, `aiwatermark`, `etchv`, or `all` |
 | `RUST_LOG` | `info,ort=warn` | |
 
 ## API
@@ -142,6 +172,7 @@ curl -F image=@photo.jpg http://127.0.0.1:8080/v1/detect
   "width": 512,
   "height": 384,
   "found": ["com.adobe.trustmark.Q"],
+  "remote_matches": [],           // algs a resolution API matched
   "watermarks": [
     {
       "alg": "com.adobe.trustmark.Q",
@@ -167,6 +198,16 @@ curl -F image=@photo.jpg http://127.0.0.1:8080/v1/detect
     ],
     "soft_binding_algorithms": [
       { "alg": "com.adobe.trustmark.Q", "registered": true, "local_decoder": true, "resolution_apis": [] }
+    ]
+  },
+  "remote": {
+    "lookups_enabled": true,
+    "uploads_enabled": ["trufo"],
+    "queries": [
+      { "service": "joinmonolith", "base_url": "https://api.joinmonolith.com/api/c2pa",
+        "alg": "com.joinmonolith.sha256", "method": "byBinding", "value": "IKe1…", "matches": [], "elapsed_ms": 180 },
+      { "service": "trufo", "base_url": "https://c2pa.trufo.ai/v1",
+        "method": "byContent", "matches": [], "elapsed_ms": 300 }
     ]
   },
   "not_checked": [

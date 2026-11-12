@@ -17,6 +17,7 @@ use crate::{
     detectors::{Detection, Detector, Payload},
     manifest::{self, ManifestReport},
     registry::Registry,
+    remote::{self, Lookup, RemoteReport},
 };
 
 pub struct AppState {
@@ -24,6 +25,7 @@ pub struct AppState {
     pub detectors: Vec<Arc<dyn Detector>>,
     /// Algorithms with a local decoder that could not be loaded, and why.
     pub unavailable: HashMap<String, String>,
+    pub remote: remote::Client,
 }
 
 pub fn router(state: Arc<AppState>, max_upload_bytes: usize) -> Router {
@@ -105,8 +107,12 @@ pub struct DetectResponse {
     pub height: u32,
     /// The `alg` of every watermark found by a local decoder.
     pub found: Vec<String>,
+    /// The `alg` of every algorithm a resolution API returned a match for.
+    pub remote_matches: Vec<String>,
     pub watermarks: Vec<WatermarkResult>,
     pub c2pa: C2paResult,
+    /// Queries to vendors' resolution APIs, when enabled.
+    pub remote: RemoteReport,
     /// Image algorithms in the list that were not checked, and why.
     pub not_checked: Vec<NotChecked>,
 }
@@ -216,6 +222,7 @@ async fn detect(
 
     let manifest_task = {
         let media_type = media_type.clone();
+        let bytes = bytes.clone();
         tokio::task::spawn_blocking(move || manifest::read(&media_type, &bytes))
     };
     let detector_tasks: Vec<_> = state
@@ -238,8 +245,21 @@ async fn detect(
         watermarks.push(result);
     }
 
+    // Payloads decoded locally can be resolved without uploading the image.
+    let lookups = watermarks
+        .iter()
+        .filter_map(|w| {
+            let hex = w.payload.as_ref()?.hex.as_ref()?;
+            Some(Lookup {
+                alg: w.alg.clone(),
+                bytes: hex::decode(hex).ok()?,
+            })
+        })
+        .collect();
+    let remote = state.remote.query(&media_type, &bytes, lookups).await;
+
     Ok(Json(build_response(
-        &state, media_type, &img, watermarks, report,
+        &state, media_type, &img, watermarks, report, remote,
     )))
 }
 
@@ -291,8 +311,25 @@ fn build_response(
     img: &DynamicImage,
     watermarks: Vec<WatermarkResult>,
     report: ManifestReport,
+    remote: RemoteReport,
 ) -> DetectResponse {
     let loaded: Vec<&str> = state.detectors.iter().map(|d| d.alg()).collect();
+    let services = &state.remote.services;
+    let checked_remotely: Vec<&str> = remote
+        .queries
+        .iter()
+        .filter(|q| q.error.is_none())
+        .flat_map(|q| q.algs(services))
+        .collect();
+    let mut remote_matches: Vec<String> = remote
+        .queries
+        .iter()
+        .filter(|q| !q.matches.is_empty())
+        .flat_map(|q| q.algs(services))
+        .map(str::to_owned)
+        .collect();
+    remote_matches.sort();
+    remote_matches.dedup();
 
     let mut soft_binding_algs: Vec<String> = report
         .soft_bindings
@@ -320,15 +357,15 @@ fn build_response(
         .registry
         .all()
         .iter()
-        .filter(|a| a.applies_to_images() && !loaded.contains(&a.alg.as_str()))
+        .filter(|a| {
+            a.applies_to_images()
+                && !loaded.contains(&a.alg.as_str())
+                && !checked_remotely.contains(&a.alg.as_str())
+        })
         .map(|a| NotChecked {
             alg: a.alg.clone(),
             kind: a.kind.clone(),
-            reason: state
-                .unavailable
-                .get(&a.alg)
-                .cloned()
-                .unwrap_or_else(|| "no public decoder".to_owned()),
+            reason: not_checked_reason(state, &a.alg),
             resolution_apis: a.soft_binding_resolution_apis.clone(),
         })
         .collect();
@@ -342,11 +379,37 @@ fn build_response(
             .filter(|w| w.found)
             .map(|w| w.alg.clone())
             .collect(),
+        remote_matches,
         watermarks,
         c2pa: C2paResult {
             report,
             soft_binding_algorithms,
         },
+        remote,
         not_checked,
+    }
+}
+
+fn not_checked_reason(state: &AppState, alg: &str) -> String {
+    if let Some(reason) = state.unavailable.get(alg) {
+        return reason.clone();
+    }
+    let service = state
+        .remote
+        .services
+        .iter()
+        .find(|s| s.algs.iter().any(|a| a == alg));
+    match service {
+        Some(s) if s.accepts_uploads() && !state.remote.config.uploads.contains(&s.name) => {
+            format!(
+                "no public decoder; set REMOTE_UPLOADS={} to send the image to its resolution API",
+                s.name
+            )
+        }
+        Some(_) if alg == "com.joinmonolith.sha256" && !state.remote.config.lookups => {
+            "set REMOTE_LOOKUPS=1 to look up the file's SHA-256".to_owned()
+        }
+        Some(_) => "no public decoder, and its resolution API needs an extracted value".to_owned(),
+        None => "no public decoder".to_owned(),
     }
 }

@@ -2,6 +2,7 @@ pub mod api;
 pub mod detectors;
 pub mod manifest;
 pub mod registry;
+pub mod remote;
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
@@ -12,9 +13,13 @@ use detectors::{
     videoseal::{self as vs, VideoSealDetector},
 };
 use registry::Registry;
+use remote::RemoteConfig;
 
-/// Loads the algorithm list and every local detector whose model files are present.
-pub fn load_state(models_dir: &Path) -> Result<api::AppState, serde_json::Error> {
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
+
+/// Loads the algorithm list, every local detector whose model files are
+/// present, and the resolution API client.
+pub fn load_state(models_dir: &Path, remote: RemoteConfig) -> Result<api::AppState, Error> {
     let registry = Registry::load()?;
     let mut detectors: Vec<Arc<dyn Detector>> = Vec::new();
     let mut unavailable = HashMap::new();
@@ -92,9 +97,17 @@ pub fn load_state(models_dir: &Path) -> Result<api::AppState, serde_json::Error>
         tracing::warn!(%alg, reason = %unavailable[alg], "detector unavailable");
     }
 
+    let remote = remote::Client::new(&registry, remote)?;
+    tracing::info!(
+        lookups = remote.config.lookups,
+        uploads = ?remote.upload_services().map(|s| &s.name).collect::<Vec<_>>(),
+        "remote resolution APIs"
+    );
+
     Ok(api::AppState {
         registry,
         detectors,
         unavailable,
+        remote,
     })
 }

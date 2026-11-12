@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use c2pa_watermark_bot::{api, load_state};
+use c2pa_watermark_bot::{api, load_state, remote::RemoteConfig};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -22,7 +22,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(25);
 
-    let state = tokio::task::spawn_blocking(move || load_state(&models_dir)).await??;
+    let state =
+        tokio::task::spawn_blocking(move || load_state(&models_dir, RemoteConfig::from_env()))
+            .await??;
     let app =
         api::router(Arc::new(state), max_upload_mb * 1024 * 1024).layer(TraceLayer::new_for_http());
 

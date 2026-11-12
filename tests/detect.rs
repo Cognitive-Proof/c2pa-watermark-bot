@@ -7,7 +7,9 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
-use c2pa_watermark_bot::{api, detectors::trustmark::TrustmarkDetector, load_state};
+use c2pa_watermark_bot::{
+    api, detectors::trustmark::TrustmarkDetector, load_state, remote::RemoteConfig,
+};
 use http_body_util::BodyExt as _;
 use image::{DynamicImage, ImageFormat, RgbImage};
 use serde_json::Value;
@@ -60,7 +62,7 @@ async fn post_detect(app: axum::Router, body: Vec<u8>, content_type: &str) -> (S
 }
 
 fn app() -> axum::Router {
-    let state = load_state(Path::new(MODELS)).unwrap();
+    let state = load_state(Path::new(MODELS), RemoteConfig::default()).unwrap();
     api::router(Arc::new(state), 25 * 1024 * 1024)
 }
 
@@ -149,7 +151,7 @@ async fn accepts_multipart_upload() {
 
 #[tokio::test]
 async fn rejects_non_image() {
-    let state = load_state(Path::new("does-not-exist")).unwrap();
+    let state = load_state(Path::new("does-not-exist"), RemoteConfig::default()).unwrap();
     let app = api::router(Arc::new(state), 1024);
     let (status, _) = post_detect(app, b"not an image".to_vec(), "text/plain").await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
